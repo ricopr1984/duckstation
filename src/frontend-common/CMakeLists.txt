@@ -5,6 +5,8 @@ add_library(frontend-common
   imgui_styles.h
   sdl_audio_stream.cpp
   sdl_audio_stream.h
+  sdl_controller_interface.cpp
+  sdl_controller_interface.h
 )
 
 target_link_libraries(frontend-common PRIVATE core common imgui SDL2::Core)

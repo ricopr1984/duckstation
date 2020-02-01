@@ -8,12 +8,14 @@
 #include "core/game_list.h"
 #include "core/gpu.h"
 #include "core/system.h"
+#include "frontend-common/sdl_controller_interface.h"
 #include "qtsettingsinterface.h"
 #include "qtutils.h"
 #include <QtCore/QCoreApplication>
 #include <QtCore/QDateTime>
 #include <QtCore/QDebug>
 #include <QtCore/QEventLoop>
+#include <QtCore/QTimer>
 #include <QtWidgets/QMenu>
 #include <QtWidgets/QMessageBox>
 #include <memory>
@@ -28,7 +30,6 @@ QtHostInterface::QtHostInterface(QObject* parent)
 {
   checkSettings();
   refreshGameList();
-  doUpdateInputMap();
   createThread();
 }
 
@@ -283,6 +284,7 @@ void QtHostInterface::OnSystemCreated()
   HostInterface::OnSystemCreated();
 
   wakeThread();
+  destroyBackgroundControllerPollTimer();
 
   emit emulationStarted();
 }
@@ -300,6 +302,9 @@ void QtHostInterface::OnSystemPaused(bool paused)
 void QtHostInterface::OnSystemDestroyed()
 {
   HostInterface::OnSystemDestroyed();
+
+  if (m_background_controller_polling_enable_count > 0)
+    createBackgroundControllerPollTimer();
 
   emit emulationStopped();
 }
@@ -351,8 +356,10 @@ void QtHostInterface::doUpdateInputMap()
 {
   m_keyboard_input_handlers.clear();
 
+  std::lock_guard<std::mutex> lock(m_qsettings_mutex);
   updateControllerInputMap();
   updateHotkeyInputMap();
+  g_sdl_controller_interface.UpdateControllerMapping();
 }
 
 void QtHostInterface::updateControllerInputMap()
@@ -656,6 +663,63 @@ void QtHostInterface::saveState(bool global, qint32 slot, bool block_until_done 
     SaveState(global, slot);
 }
 
+void QtHostInterface::enableBackgroundControllerPolling()
+{
+  if (!isOnWorkerThread())
+  {
+    QMetaObject::invokeMethod(this, "enableBackgroundControllerPolling", Qt::BlockingQueuedConnection);
+    return;
+  }
+
+  if (m_background_controller_polling_enable_count++ > 0)
+    return;
+
+  if (!m_system)
+  {
+    createBackgroundControllerPollTimer();
+
+    // drain the event queue so we don't get events late
+    g_sdl_controller_interface.PumpSDLEvents();
+  }
+}
+
+void QtHostInterface::disableBackgroundControllerPolling()
+{
+  if (!isOnWorkerThread())
+  {
+    QMetaObject::invokeMethod(this, "disableBackgroundControllerPolling");
+    return;
+  }
+
+  Assert(m_background_controller_polling_enable_count > 0);
+  if (--m_background_controller_polling_enable_count > 0)
+    return;
+
+  if (!m_system)
+    destroyBackgroundControllerPollTimer();
+}
+
+void QtHostInterface::doBackgroundControllerPoll()
+{
+  g_sdl_controller_interface.PumpSDLEvents();
+}
+
+void QtHostInterface::createBackgroundControllerPollTimer()
+{
+  DebugAssert(!m_background_controller_polling_timer);
+  m_background_controller_polling_timer = new QTimer(this);
+  m_background_controller_polling_timer->setSingleShot(false);
+  m_background_controller_polling_timer->setTimerType(Qt::VeryCoarseTimer);
+  connect(m_background_controller_polling_timer, &QTimer::timeout, this, &QtHostInterface::doBackgroundControllerPoll);
+  m_background_controller_polling_timer->start(BACKGROUND_CONTROLLER_POLLING_INTERVAL);
+}
+
+void QtHostInterface::destroyBackgroundControllerPollTimer()
+{
+  delete m_background_controller_polling_timer;
+  m_background_controller_polling_timer = nullptr;
+}
+
 void QtHostInterface::createThread()
 {
   m_original_thread = QThread::currentThread();
@@ -682,6 +746,12 @@ void QtHostInterface::threadEntryPoint()
 {
   m_worker_thread_event_loop = new QEventLoop();
 
+  // set up controller interface and immediate poll to pick up the controller attached events
+  g_sdl_controller_interface.Initialize(this, true);
+  g_sdl_controller_interface.PumpSDLEvents();
+
+  doUpdateInputMap();
+
   // TODO: Event which flags the thread as ready
   while (!m_shutdown_flag.load())
   {
@@ -707,10 +777,14 @@ void QtHostInterface::threadEntryPoint()
       m_system->Throttle();
 
     m_worker_thread_event_loop->processEvents(QEventLoop::AllEvents);
+    g_sdl_controller_interface.PumpSDLEvents();
   }
 
   m_system.reset();
   m_audio_stream.reset();
+
+  g_sdl_controller_interface.Shutdown();
+
   delete m_worker_thread_event_loop;
   m_worker_thread_event_loop = nullptr;
 
