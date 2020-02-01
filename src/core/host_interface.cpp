@@ -878,6 +878,38 @@ void HostInterface::SetTimerResolutionIncreased(bool enabled)
 #endif
 }
 
+void HostInterface::DisplayLoadingScreen(const char* message, int progress_min /*= -1*/, int progress_max /*= -1*/,
+                                         int progress_value /*= -1*/)
+{
+  const auto& io = ImGui::GetIO();
+  const float scale = io.DisplayFramebufferScale.x;
+
+  ImGui::SetNextWindowSize(ImVec2(400.0f * scale, 50.0f * scale), ImGuiCond_Always);
+  ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Always,
+                          ImVec2(0.5f, 0.5f));
+  if (ImGui::Begin("LoadingScreen", nullptr,
+                   ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoMove |
+                     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing))
+  {
+    if (progress_min < progress_max)
+    {
+      ImGui::Text("%s: %d/%d", message, progress_value, progress_max);
+      ImGui::ProgressBar(static_cast<float>(progress_value) / static_cast<float>(progress_max - progress_min),
+                         ImVec2(-1.0f, 0.0f), "");
+      Log_InfoPrintf("%s: %d/%d", message, progress_value, progress_max);
+    }
+    else
+    {
+      ImGui::TextUnformatted(message);
+      Log_InfoPrintf("%s", message);
+    }
+  }
+  ImGui::End();
+
+  m_display->Render();
+}
+
 bool HostInterface::SaveResumeSaveState()
 {
   if (!m_system)
